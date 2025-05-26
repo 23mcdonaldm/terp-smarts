@@ -1,5 +1,12 @@
 import pdfplumber
 import re
+from supabase import create_client, Client
+import os
+from dotenv import load_dotenv
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_squared_error, r2_score
+from sklearn.model_selection import train_test_split
+import numpy as np
 
 def parse_transcript(text):
     # Split text into semesters
@@ -67,6 +74,17 @@ def parse_transcript(text):
     return semesters
 
 
+
+def get_course_gpas(course_codes):
+    try:
+        result = supabase.table('courses').select('course_id, average_gpa').in_('course_id', course_codes).execute()
+        course_gpas = {row['course_id']: row['average_gpa'] for row in result.data}
+        return course_gpas
+    except Exception as e:
+        print(f"Error getting course gpas: {e}")
+        return None
+    
+
 # Read the PDF
 with pdfplumber.open("transcript3.pdf") as pdf:
     full_text = ""
@@ -103,6 +121,7 @@ def grade_to_gpa(grade):
 
 user_courses = {}
 courses_taken_list = []
+count = 0
 for semester, courses in semesters.items():
     curr_semester = {
         "gpa": 0,
@@ -120,6 +139,8 @@ for semester, courses in semesters.items():
         })
         curr_semester["gpa"] += grade_to_gpa(course['grade']) * course['credits_earned']
         curr_semester["credits"] += course['credits_earned']
+    curr_semester["semester"] = count
+    count += 1
     if curr_semester["credits"] > 0:
         curr_semester["gpa"] = curr_semester["gpa"] / curr_semester["credits"]
     else:
@@ -148,7 +169,73 @@ print(user_courses)
 print("--------------------------------")
 
 # get all course average_gpas from database
+load_dotenv()
+db_url: str = os.getenv("SUPABASE_URL")
+db_key: str = os.getenv("SUPABASE_KEY")
+supabase: Client = create_client(db_url, db_key)
 
+average_gpas = get_course_gpas(courses_taken_list)
+
+
+# go through semesters, calculate difficulty of each semester (avg gpa according to planetterp)
+for semester, semester_data in user_courses.items():
+    semester_data["semester_difficulty"] = 0  # Initialize difficulty
+    for course in semester_data["courses"]:  # Access the courses list
+        course_code = course["class"]
+        expected_course_gpa = average_gpas.get(course_code, 0)
+        semester_data["semester_difficulty"] += expected_course_gpa * course["credits"]
+    if semester_data["credits"] > 0:
+        semester_data["semester_difficulty"] = semester_data["semester_difficulty"] / semester_data["credits"]
+    else:
+        semester_data["semester_difficulty"] = 0
+    semester_data["delta_gpa"] = semester_data["gpa"] - semester_data["semester_difficulty"]
+
+print(user_courses)
+
+
+all_deltas = [s["delta_gpa"] for s in user_courses.values()]
+mean_delta = np.mean(all_deltas)
+std_delta = np.std(all_deltas)
+
+# adds Sigmoid-normalized score to each semester
+for semester in user_courses.values():
+    z = (semester["delta_gpa"] - mean_delta) / std_delta if std_delta != 0 else 0
+    score = 1 / (1 + np.exp(-z))
+    semester["score"] = score
 
 # scoring model predicting user performance
 # 0 - worst student, 0.5 - student performing as expected, 1 - best student
+# goal: identify
+# A student with a 4.0 GPA in easy classes gets a modest score.
+
+# A student with a 3.7 GPA in hard classes, heavy course load, and tough grading can score higher.
+
+# It accounts for difficulty, load, and performance variance — a multidimensional quality metric.
+
+X = []
+y = []
+
+
+for semester in user_courses.values():
+    X.append([semester["semester"], semester["gpa"], semester["credits"], semester["semester_difficulty"], semester["delta_gpa"], semester["score"]])
+    y.append(semester["gpa"])
+
+X = np.array(X)
+y = np.array(y)
+
+
+regressor = RandomForestRegressor(n_estimators=10, random_state=42, oob_score=True)
+regressor.fit(X, y)
+
+oob_score = regressor.oob_score_
+print(f'Out-of-Bag Score: {oob_score}')
+
+predictions = regressor.predict(x)
+
+mse = mean_squared_error(y, predictions)
+print(f'Mean Squared Error: {mse}')
+
+r2 = r2_score(y, predictions)
+print(f'R-squared: {r2}')
+
+

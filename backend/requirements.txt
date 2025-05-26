@@ -1,6 +1,7 @@
 pandas
 requests
 python-dotenv
-psycopg2
 supabase
-pypdf
+pdfplumber
+numpy
+scikit-learn
