@@ -8,7 +8,7 @@ from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.model_selection import train_test_split
 import numpy as np
 
-def parse_transcript(text):
+def parse_transcript(text, courses_taken_list):
     # Split text into semesters
     semesters = {}
     current_semester = None
@@ -55,6 +55,7 @@ def parse_transcript(text):
                     'is_upcoming': True  # Add flag to identify upcoming courses
                 }
                 semesters[current_semester].append(course)
+                courses_taken_list.append(course['code'])
         # Handle historical courses
         else:
             course_match = re.search(course_pattern, line)
@@ -70,6 +71,7 @@ def parse_transcript(text):
                     'is_upcoming': False  # Add flag to identify historical courses
                 }
                 semesters[current_semester].append(course)
+                courses_taken_list.append(course['code'])
     
     return semesters
 
@@ -85,14 +87,24 @@ def get_course_gpas(course_codes):
         return None
     
 
+# get all course average_gpas from database
+load_dotenv()
+db_url: str = os.getenv("SUPABASE_URL")
+db_key: str = os.getenv("SUPABASE_KEY")
+supabase: Client = create_client(db_url, db_key)
+
+
 # Read the PDF
 with pdfplumber.open("transcript3.pdf") as pdf:
     full_text = ""
     for page in pdf.pages:
         full_text += page.extract_text()
 
-# print(full_text)
-semesters = parse_transcript(full_text)
+
+courses_taken_list = []
+semesters = parse_transcript(full_text, courses_taken_list)
+
+average_gpas = get_course_gpas(courses_taken_list)
 
 # Print the results
 for semester, courses in semesters.items():
@@ -120,7 +132,7 @@ def grade_to_gpa(grade):
   return gpa_map.get(grade)
 
 user_courses = {}
-courses_taken_list = []
+all_deltas = []
 count = 0
 for semester, courses in semesters.items():
     curr_semester = {
@@ -128,13 +140,17 @@ for semester, courses in semesters.items():
         "credits": 0,
         "courses": [],
     }
+    semester_difficulty = 0.0
     for course in courses:
         if course.get('is_upcoming', True):
             continue
-        courses_taken_list.append(course['code'])
+        expected_course_gpa = average_gpas.get(course['code'], 0)
+        gpa = grade_to_gpa(course['grade'])
+        semester_difficulty += expected_course_gpa * course['credits_earned']
+        # figure out how to handle W and NG
         curr_semester["courses"].append({
             'class': course['code'],
-            'grade': grade_to_gpa(course['grade']),
+            'grade': gpa,
             'credits': course['credits_earned'],
         })
         curr_semester["gpa"] += grade_to_gpa(course['grade']) * course['credits_earned']
@@ -143,8 +159,12 @@ for semester, courses in semesters.items():
     count += 1
     if curr_semester["credits"] > 0:
         curr_semester["gpa"] = curr_semester["gpa"] / curr_semester["credits"]
+        curr_semester["semester_difficulty"] = semester_difficulty / curr_semester["credits"]
     else:
         curr_semester["gpa"] = 0
+        curr_semester["semester_difficulty"] = 0
+    curr_semester["delta_gpa"] = curr_semester["gpa"] - curr_semester["semester_difficulty"]
+    all_deltas.append(curr_semester["delta_gpa"])
     user_courses[semester] = curr_semester
 
 user_courses.pop("Fall 2025", None)
@@ -168,32 +188,25 @@ print(user_courses)
 
 print("--------------------------------")
 
-# get all course average_gpas from database
-load_dotenv()
-db_url: str = os.getenv("SUPABASE_URL")
-db_key: str = os.getenv("SUPABASE_KEY")
-supabase: Client = create_client(db_url, db_key)
-
-average_gpas = get_course_gpas(courses_taken_list)
 
 
 # go through semesters, calculate difficulty of each semester (avg gpa according to planetterp)
-for semester, semester_data in user_courses.items():
-    semester_data["semester_difficulty"] = 0  # Initialize difficulty
-    for course in semester_data["courses"]:  # Access the courses list
-        course_code = course["class"]
-        expected_course_gpa = average_gpas.get(course_code, 0)
-        semester_data["semester_difficulty"] += expected_course_gpa * course["credits"]
-    if semester_data["credits"] > 0:
-        semester_data["semester_difficulty"] = semester_data["semester_difficulty"] / semester_data["credits"]
-    else:
-        semester_data["semester_difficulty"] = 0
-    semester_data["delta_gpa"] = semester_data["gpa"] - semester_data["semester_difficulty"]
+# for semester, semester_data in user_courses.items():
+#     semester_data["semester_difficulty"] = 0  # Initialize difficulty
+#     for course in semester_data["courses"]:  # Access the courses list
+#         course_code = course["class"]
+#         expected_course_gpa = average_gpas.get(course_code, 0)
+#         semester_data["semester_difficulty"] += expected_course_gpa * course["credits"]
+#     if semester_data["credits"] > 0:
+#         semester_data["semester_difficulty"] = semester_data["semester_difficulty"] / semester_data["credits"]
+#     else:
+#         semester_data["semester_difficulty"] = 0
+#     semester_data["delta_gpa"] = semester_data["gpa"] - semester_data["semester_difficulty"]
 
-print(user_courses)
+# print(user_courses)
 
 
-all_deltas = [s["delta_gpa"] for s in user_courses.values()]
+# all_deltas = [s["delta_gpa"] for s in user_courses.values()]
 mean_delta = np.mean(all_deltas)
 std_delta = np.std(all_deltas)
 
@@ -217,11 +230,13 @@ y = []
 
 
 for semester in user_courses.values():
-    X.append([semester["semester"], semester["gpa"], semester["credits"], semester["semester_difficulty"], semester["delta_gpa"], semester["score"]])
-    y.append(semester["gpa"])
+    X.append([semester["semester"], semester["gpa"], semester["credits"], semester["semester_difficulty"], semester["delta_gpa"]])
+    y.append(semester["score"])
 
 X = np.array(X)
 y = np.array(y)
+
+# X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.33, random_state=42)
 
 
 regressor = RandomForestRegressor(n_estimators=10, random_state=42, oob_score=True)
@@ -230,7 +245,7 @@ regressor.fit(X, y)
 oob_score = regressor.oob_score_
 print(f'Out-of-Bag Score: {oob_score}')
 
-predictions = regressor.predict(x)
+predictions = regressor.predict(X)
 
 mse = mean_squared_error(y, predictions)
 print(f'Mean Squared Error: {mse}')
