@@ -7,6 +7,7 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_squared_error, r2_score
 from sklearn.model_selection import train_test_split
 import numpy as np
+import pandas as pd
 
 def parse_transcript(text, courses_taken_list):
     # Split text into semesters
@@ -85,13 +86,23 @@ def get_course_gpas(course_codes):
     except Exception as e:
         print(f"Error getting course gpas: {e}")
         return None
-    
+
+def get_student_semesters():
+    try:
+        result = supabase.table('student_semesters').select('*').execute()
+        return result
+    except Exception as e:
+        print(f"Error getting student semester data: {e}")
+        return None
 
 # get all course average_gpas from database
 load_dotenv()
 db_url: str = os.getenv("SUPABASE_URL")
 db_key: str = os.getenv("SUPABASE_KEY")
 supabase: Client = create_client(db_url, db_key)
+
+curr_user_id = "123"
+curr_user_name = "John Doe"
 
 
 # Read the PDF
@@ -190,23 +201,6 @@ print("--------------------------------")
 
 
 
-# go through semesters, calculate difficulty of each semester (avg gpa according to planetterp)
-# for semester, semester_data in user_courses.items():
-#     semester_data["semester_difficulty"] = 0  # Initialize difficulty
-#     for course in semester_data["courses"]:  # Access the courses list
-#         course_code = course["class"]
-#         expected_course_gpa = average_gpas.get(course_code, 0)
-#         semester_data["semester_difficulty"] += expected_course_gpa * course["credits"]
-#     if semester_data["credits"] > 0:
-#         semester_data["semester_difficulty"] = semester_data["semester_difficulty"] / semester_data["credits"]
-#     else:
-#         semester_data["semester_difficulty"] = 0
-#     semester_data["delta_gpa"] = semester_data["gpa"] - semester_data["semester_difficulty"]
-
-# print(user_courses)
-
-
-# all_deltas = [s["delta_gpa"] for s in user_courses.values()]
 mean_delta = np.mean(all_deltas)
 std_delta = np.std(all_deltas)
 
@@ -215,6 +209,28 @@ for semester in user_courses.values():
     z = (semester["delta_gpa"] - mean_delta) / std_delta if std_delta != 0 else 0
     score = 1 / (1 + np.exp(-z))
     semester["score"] = score
+
+# adding curr user's data to database
+db_semesters = []
+for semester in user_courses.values():
+    db_semesters.append({
+        "student_id": curr_user_id,
+        "name": curr_user_name,
+        "semester": semester["semester"],
+        "gpa": semester["gpa"],
+        "credits": semester["credits"],
+        "difficulty": semester["semester_difficulty"],
+        "delta_gpa": semester["delta_gpa"],
+        "score": semester["score"],
+        "created_at": pd.Timestamp.now().isoformat(),
+    })
+
+supabase.table('student_semesters').upsert(db_semesters, on_conflict='student_id, semester').execute()
+
+# getting all semester data from the database
+student_semesters = get_student_semesters()
+
+print("Student Semesters: ", student_semesters)
 
 # scoring model predicting user performance
 # 0 - worst student, 0.5 - student performing as expected, 1 - best student
@@ -229,7 +245,7 @@ X = []
 y = []
 
 
-for semester in user_courses.values():
+for semester in student_semesters:
     X.append([semester["semester"], semester["gpa"], semester["credits"], semester["semester_difficulty"], semester["delta_gpa"]])
     y.append(semester["score"])
 
