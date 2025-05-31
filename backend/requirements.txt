@@ -5,3 +5,4 @@ supabase
 pdfplumber
 numpy
 scikit-learn
+fastapi
