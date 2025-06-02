@@ -15,3 +15,9 @@ now (venv) should be displayed before your user in terminal
 
 python3 course_fetcher.py
 
+
+to run frontend:
+
+cd frontend/terp-smarts
+npm install
+npm run dev
